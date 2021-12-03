@@ -1,6 +1,6 @@
-numpy
-pillow
-pywavelets
-scipy
-scikit-learn
-tqdm
+numpy>=1.21.4
+pillow>=8.4.0
+pywavelets>=1.2.0
+scipy>=1.7.2
+scikit-learn>=1.0.1
+tqdm>=4.62.3

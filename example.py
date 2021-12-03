@@ -24,14 +24,15 @@ def main():
     Check the detection performance obtained with cross-correlation and PCE
     :return:
     """
-    ff_dirlist = np.array(sorted(glob('test/data/ff-jpg/*.JPG')))
+    ff_dirlist = np.array(sorted(glob('dataset_prnu/flat/*.jpg')))
     ff_device = np.array([os.path.split(i)[1].rsplit('_', 1)[0] for i in ff_dirlist])
 
-    nat_dirlist = np.array(sorted(glob('test/data/nat-jpg/*.JPG')))
+    nat_dirlist = np.array(sorted(glob('dataset_prnu/nat/*.jpg')))
     nat_device = np.array([os.path.split(i)[1].rsplit('_', 1)[0] for i in nat_dirlist])
 
     print('Computing fingerprints')
     fingerprint_device = sorted(np.unique(ff_device))
+
     k = []
     for device in fingerprint_device:
         imgs = []
@@ -49,6 +50,12 @@ def main():
         k += [prnu.extract_multiple_aligned(imgs, processes=cpu_count())]
 
     k = np.stack(k, 0)
+
+    # Save the prnu images
+    for i, prnu_val in enumerate(k):
+        print(fingerprint_device[i])
+        prnu_val = Image.fromarray(prnu_val, 'L')
+        prnu_val.save("prnu_images/prnu_{}.jpg".format(fingerprint_device[i]))
 
     print('Computing residuals')
 
