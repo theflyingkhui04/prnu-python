@@ -72,27 +72,26 @@ Or directly from GitHub
 
 ::
 
-   pip install git+git://github.com/samuelebortolotti/prnu-python@releases/tag/v[version]#[package-name]
+   pip install git+git://github.com/samuelebortolotti/prnu-python@v[version]
 
-Where [version] and [package-name] are respectively the version of the
-package release and package-name is the name of the package.
+Where [version] is the version of the
 
 ::
 
-   pip install git+git://github.com/samuelebortolotti/prnu-python@releases/tag/v1.3#prnu
+   pip install git+git://github.com/samuelebortolotti/prnu-python@v2.0
 
 Or you can add the package in your ``requirements.txt`` file, and
 install it later, by including the following line
 
 ::
 
-   git+git://github.com/samuelebortolotti/prnu-python@releases/tag/v[version]#[package-name]
+   git+git://github.com/samuelebortolotti/prnu-python@v[version]
 
 For example:
 
 ::
 
-   git+git://github.com/samuelebortolotti/prnu-python@releases/tag/v1.3#prnu
+   git+git://github.com/samuelebortolotti/prnu-python@v2.0
 
 Now you can import the ``prnu`` package whenever and wherever you want.
 

@@ -8,7 +8,7 @@ PYFLAGS :=
 PIP := pip
 # ======= DOC   =========
 AUTHORS := --author "Luca Bondi, Paolo Bestagini, Nicolò Bonettini, Simone Alghisi, Samuele Bortolotti, Massimo Rizzoli" 
-VERSION :=-r 1.0.0
+VERSION :=-r 2.0.0
 LANGUAGE := --language en
 SPHINX_EXTENSIONS := --extensions sphinx.ext.autodoc --extensions sphinx.ext.viewcode
 DOC_FOLDER := docs
