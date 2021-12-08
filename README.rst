@@ -95,8 +95,8 @@ For example:
 
 Now you can import the ``prnu`` package whenever and wherever you want.
 
-Install the package in the poetry virtual environment
-^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+Install the package in the virtual environment
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
 You can use the ``GNU Makefile`` to generate the virtual environment by
 typing
