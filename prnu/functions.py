@@ -1,35 +1,52 @@
 # -*- coding: UTF-8 -*-
-"""
-@author: Luca Bondi (luca.bondi@polimi.it)
-@author: Paolo Bestagini (paolo.bestagini@polimi.it)
-@author: Nicolò Bonettini (nicolo.bonettini@polimi.it)
-Politecnico di Milano 2018
-"""
+r"""
 
-from multiprocessing import Pool, cpu_count
+PRNU related functions
+
+Original authors:
+
+:author: Luca Bondi (luca.bondi@polimi.it)
+:author: Paolo Bestagini (paolo.bestagini@polimi.it)
+:author: Nicolò Bonettini (nicolo.bonettini@polimi.it)
+
+Politecnico di Milano 2018
+
+Small subsequent changes for handling PyTorch module prediction as denoising method were included by:
+
+:author: Simone Alghisi (simone.alghisi-1@studenti.unitn.it)
+:author: Samuele Bortolotti (samuele.bortolotti@studenti.unitn.it)
+:author: Massimo Rizzoli (massimo.rizzoli@studenti.unitn.it)
+
+Università di Trento 2021
+"""
 
 import numpy as np
 import pywt
 from numpy.fft import fft2, ifft2
 from scipy.ndimage import filters
 from sklearn.metrics import roc_curve, auc
+from skimage.restoration import estimate_sigma
 from tqdm import tqdm
+import torch
 from torch import nn
-
+from torch.autograd import Variable
 
 class ArgumentError(Exception):
+  """
+  Argument error exception
+  """
   pass
-
 
 """
 Extraction functions
 """
 
-
 def extract_single(im: np.ndarray,
-           levels: int = 4,
-           sigma: float = 5,
-           wdft_sigma: float = 0) -> np.ndarray:
+                  levels: int = 4,
+                  sigma: float = 5,
+                  model: nn.Module = None,
+                  device: str = 'cuda',
+                  wdft_sigma: float = 0) -> np.ndarray:
   """
   Extract noise residual from a single image
   :param im: grayscale or color image, np.uint8
@@ -38,8 +55,7 @@ def extract_single(im: np.ndarray,
   :param wdft_sigma: estimated DFT noise power
   :return: noise residual
   """
-
-  W = noise_extract(im, levels, sigma)
+  W = noise_extract(im, levels, sigma, model, device)
   W = rgb2gray(W)
   W = zero_mean_total(W)
   W_std = W.std(ddof=1) if wdft_sigma == 0 else wdft_sigma
@@ -47,14 +63,18 @@ def extract_single(im: np.ndarray,
 
   return W
 
-
-def noise_extract(im: np.ndarray, levels: int = 4, sigma: float = 5) -> np.ndarray:
+def noise_extract(im: np.ndarray, levels: int = 4, sigma: float = 5, 
+                  model: nn.Module = None, device: str = 'cuda') -> np.ndarray:
   """
   NoiseExtract as from Binghamton toolbox.
+  If model is not None, the wavelet denoising method is employed, otherwise the noise
+  will be extracted using the neural network model performing a prediction on the image.
 
   :param im: grayscale or color image, np.uint8
   :param levels: number of wavelet decomposition levels
   :param sigma: estimated noise power
+  :param model: PyTorch neural network model
+  :param device: model device either cuda or cpu
   :return: noise residual
   """
 
@@ -63,79 +83,108 @@ def noise_extract(im: np.ndarray, levels: int = 4, sigma: float = 5) -> np.ndarr
 
   im = im.astype(np.float32)
 
-  noise_var = sigma ** 2
+  if model:
+    model = model.to(device)
+    model.eval()
 
-  if im.ndim == 2:
-    im.shape += (1,)
+    # Normalise image
+    im /= 255
 
-  W = np.zeros(im.shape, np.float32)
+    if sigma is None:
+      # estimate sigmas for each image
+      sigma = estimate_sigma(im, average_sigmas=True, multichannel=True)
+    else:
+      sigma /= 255
 
-  for ch in range(im.shape[2]):
+    # HxWxC to CxHxW
+    im = np.transpose(im, (2, 0, 1))
 
-    wlet = None
-    while wlet is None and levels > 0:
+    # Increase the size to make it compatible with a batch
+    im = np.expand_dims(im, 0)
+
+    im = Variable(torch.as_tensor(im, dtype=torch.float).to(device))
+
+    sigma = np.asarray([sigma])
+    sigma = Variable(torch.as_tensor(sigma, dtype=torch.float).to(device))
+
+    # Predict noise and scale to 255
+    W = model(im, sigma) * 255
+    W = W.cpu().detach().numpy().squeeze(0).transpose(1, 2, 0)
+  else:
+    noise_var = sigma ** 2
+
+    if im.ndim == 2:
+      im.shape += (1,)
+
+    W = np.zeros(im.shape, np.float32)
+
+    for ch in range(im.shape[2]):
+
+      wlet = None
+      while wlet is None and levels > 0:
+        try:
+          wlet = pywt.wavedec2(im[:, :, ch], 'db4', level=levels)
+        except ValueError:
+          levels -= 1
+          wlet = None
+      if wlet is None:
+        raise ValueError('Impossible to compute Wavelet filtering for input size: {}'.format(im.shape))
+
+      wlet_details = wlet[1:]
+
+      wlet_details_filter = [None] * len(wlet_details)
+
+      # Cycle over Wavelet levels 1:levels-1
+      
+      for wlet_level_idx, wlet_level in enumerate(wlet_details):
+        # Cycle over H,V,D components
+        level_coeff_filt = [None] * 3
+        for wlet_coeff_idx, wlet_coeff in enumerate(wlet_level):
+          level_coeff_filt[wlet_coeff_idx] = wiener_adaptive(wlet_coeff, noise_var)
+        wlet_details_filter[wlet_level_idx] = tuple(level_coeff_filt)
+
+      # Set filtered detail coefficients for Levels > 0 ---
+      wlet[1:] = wlet_details_filter
+
+      # Set to 0 all Level 0 approximation coefficients ---
+      wlet[0][...] = 0
+
+      # Invert wavelet transform ---
+      wrec = pywt.waverec2(wlet, 'db4')
       try:
-        wlet = pywt.wavedec2(im[:, :, ch], 'db4', level=levels)
+        W[:, :, ch] = wrec
       except ValueError:
-        levels -= 1
-        wlet = None
-    if wlet is None:
-      raise ValueError('Impossible to compute Wavelet filtering for input size: {}'.format(im.shape))
+        W = np.zeros(wrec.shape[:2] + (im.shape[2],), np.float32)
+        W[:, :, ch] = wrec
 
-    wlet_details = wlet[1:]
-
-    wlet_details_filter = [None] * len(wlet_details)
-    # Cycle over Wavelet levels 1:levels-1
-    for wlet_level_idx, wlet_level in enumerate(wlet_details):
-      # Cycle over H,V,D components
-      level_coeff_filt = [None] * 3
-      for wlet_coeff_idx, wlet_coeff in enumerate(wlet_level):
-        level_coeff_filt[wlet_coeff_idx] = wiener_adaptive(wlet_coeff, noise_var)
-      wlet_details_filter[wlet_level_idx] = tuple(level_coeff_filt)
-
-    # Set filtered detail coefficients for Levels > 0 ---
-    wlet[1:] = wlet_details_filter
-
-    # Set to 0 all Level 0 approximation coefficients ---
-    wlet[0][...] = 0
-
-    # Invert wavelet transform ---
-    wrec = pywt.waverec2(wlet, 'db4')
-    try:
-      W[:, :, ch] = wrec
-    except ValueError:
-      W = np.zeros(wrec.shape[:2] + (im.shape[2],), np.float32)
-      W[:, :, ch] = wrec
-
-  if W.shape[2] == 1:
-    W.shape = W.shape[:2]
-
-  W = W[:im.shape[0], :im.shape[1]]
+    W = W[:im.shape[0], :im.shape[1]]
 
   return W
-
 
 def noise_extract_compact(args):
   """
   Extract residual, multiplied by the image. Useful to save memory in multiprocessing operations
-  :param args: (im, levels, sigma), see noise_extract for usage
+
+  :param args: (im, levels, sigma, model, device), see noise_extract for usage
   :return: residual, multiplied by the image
   """
   w = noise_extract(*args)
   im = args[0]
   return (w * im / 255.).astype(np.float32)
 
-
-def extract_multiple_aligned(imgs: list, levels: int = 4, sigma: float = 5, processes: int = None,
-               batch_size=cpu_count(), tqdm_str: str = '') -> np.ndarray:
+def extract_multiple_aligned(imgs: list, model: nn.Module = None, device: str = 'cuda', 
+                            levels: int = 4, sigma: float = 5, tqdm_str: str = '') -> np.ndarray:
   """
-  Extract PRNU from a list of images. Images are supposed to be the same size and properly oriented
-  :param tqdm_str: tqdm description (see tqdm documentation)
-  :param batch_size: number of parallel processed images
-  :param processes: number of parallel processes
+  Extract PRNU from a list of images. Images are supposed to be the same size and properly oriented.
+  If model is not None, the wavelet denoising method is employed, otherwise the noise
+  will be extracted using the neural network model performing a prediction on the image.
+
   :param imgs: list of images of size (H,W,Ch) and type np.uint8
+  :param model: PyTorch model
+  :param device: model device either cuda or cpu
   :param levels: number of wavelet decomposition levels
   :param sigma: estimated noise power
+  :param tqdm_str: tqdm description (see tqdm documentation)
   :return: PRNU
   """
   assert (isinstance(imgs[0], np.ndarray))
@@ -144,35 +193,15 @@ def extract_multiple_aligned(imgs: list, levels: int = 4, sigma: float = 5, proc
 
   h, w, ch = imgs[0].shape
 
+  if sigma is None:
+    print('\ncomputing sigma for each image\n')
+
   RPsum = np.zeros((h, w, ch), np.float32)
   NN = np.zeros((h, w, ch), np.float32)
-
-  if processes is None or processes > 1:
-    args_list = []
-    for im in imgs:
-      args_list += [(im, levels, sigma)]
-    pool = Pool(processes=processes)
-
-    for batch_idx0 in tqdm(np.arange(start=0, step=batch_size, stop=len(imgs)), disable=tqdm_str == '',
-                 desc=(tqdm_str + ' (1/2)'), dynamic_ncols=True):
-      nni = pool.map(inten_sat_compact, args_list[batch_idx0:batch_idx0 + batch_size])
-      for ni in nni:
-        NN += ni
-      del nni
-
-    for batch_idx0 in tqdm(np.arange(start=0, step=batch_size, stop=len(imgs)), disable=tqdm_str == '',
-                 desc=(tqdm_str + ' (2/2)'), dynamic_ncols=True):
-      wi_list = pool.map(noise_extract_compact, args_list[batch_idx0:batch_idx0 + batch_size])
-      for wi in wi_list:
-        RPsum += wi
-      del wi_list
-
-    pool.close()
-
-  else:  # Single process
-    for im in tqdm(imgs, disable=tqdm_str is None, desc=tqdm_str, dynamic_ncols=True):
-      RPsum += noise_extract_compact((im, levels, sigma))
-      NN += (inten_scale(im) * saturation(im)) ** 2
+  # Single process
+  for im in tqdm(imgs, disable=tqdm_str is '', desc=tqdm_str, dynamic_ncols=True):
+    RPsum += noise_extract_compact((im, levels, sigma, model, device))
+    NN += (inten_scale(im) * saturation(im)) ** 2
 
   K = RPsum / (NN + 1)
   K = rgb2gray(K)
@@ -180,10 +209,11 @@ def extract_multiple_aligned(imgs: list, levels: int = 4, sigma: float = 5, proc
   K = wiener_dft(K, K.std(ddof=1)).astype(np.float32)
 
   return K
-  
+
 def cut_ctr(array: np.ndarray, sizes: tuple) -> np.ndarray:
   """
   Cut a multi-dimensional array at its center, according to sizes
+
   :param array: multidimensional array
   :param sizes: tuple of the same length as array.ndim
   :return: multidimensional array, center cut
@@ -208,6 +238,7 @@ def cut_ctr(array: np.ndarray, sizes: tuple) -> np.ndarray:
 def wiener_dft(im: np.ndarray, sigma: float) -> np.ndarray:
   """
   Adaptive Wiener filter applied to the 2D FFT of the image
+
   :param im: multidimensional array
   :param sigma: estimated noise power
   :return: filtered version of input im
@@ -234,6 +265,7 @@ def wiener_dft(im: np.ndarray, sigma: float) -> np.ndarray:
 def zero_mean(im: np.ndarray) -> np.ndarray:
   """
   ZeroMean called with the 'both' argument, as from Binghamton toolbox.
+
   :param im: multidimensional array
   :return: zero mean version of input im
   """
@@ -268,6 +300,7 @@ def zero_mean(im: np.ndarray) -> np.ndarray:
 def zero_mean_total(im: np.ndarray) -> np.ndarray:
   """
   ZeroMeanTotal as from Binghamton toolbox.
+
   :param im: multidimensional array
   :return: zero mean version of input im
   """
@@ -278,11 +311,13 @@ def zero_mean_total(im: np.ndarray) -> np.ndarray:
   return im
 
 
-def rgb2gray(im: np.ndarray) -> np.ndarray:
+def rgb2gray(im: np.ndarray, multichannel: bool = True) -> np.ndarray:
   """
   RGB to gray as from Binghamton toolbox.
+
   :param im: multidimensional array
-  :return: grayscale version of input im
+  :param multichannel: if false, return green channel as gray
+  :return: grayscale version of input image
   """
   rgb2gray_vector = np.asarray([0.29893602, 0.58704307, 0.11402090]).astype(np.float32)
   rgb2gray_vector.shape = (3, 1)
@@ -292,19 +327,22 @@ def rgb2gray(im: np.ndarray) -> np.ndarray:
   elif im.shape[2] == 1:
     im_gray = np.copy(im[:, :, 0])
   elif im.shape[2] == 3:
-    w, h = im.shape[:2]
-    im = np.reshape(im, (w * h, 3))
-    im_gray = np.dot(im, rgb2gray_vector)
-    im_gray.shape = (w, h)
+    if multichannel:
+      w, h = im.shape[:2]
+      im = np.reshape(im, (w * h, 3))
+      im_gray = np.dot(im, rgb2gray_vector)
+      im_gray.shape = (w, h)
+    else:
+      im_gray = im[:, :, 1]
   else:
     raise ValueError('Input image must have 1 or 3 channels')
 
   return im_gray.astype(np.float32)
 
-
 def threshold(wlet_coeff_energy_avg: np.ndarray, noise_var: float) -> np.ndarray:
   """
   Noise variance theshold as from Binghamton toolbox.
+
   :param wlet_coeff_energy_avg:
   :param noise_var:
   :return: noise variance threshold
@@ -319,9 +357,9 @@ def wiener_adaptive(x: np.ndarray, noise_var: float, **kwargs) -> np.ndarray:
   Wiener adaptive flter aimed at extracting the noise component
   For each input pixel the average variance over a neighborhoods of different window sizes is first computed.
   The smaller average variance is taken into account when filtering according to Wiener.
+  
   :param x: 2D matrix
   :param noise_var: Power spectral density of the noise we wish to extract (S)
-  :param window_size_list: list of window sizes
   :return: wiener filtered version of input x
   """
   window_size_list = list(kwargs.pop('window_size_list', [3, 5, 7, 9]))
@@ -345,6 +383,7 @@ def wiener_adaptive(x: np.ndarray, noise_var: float, **kwargs) -> np.ndarray:
 def inten_scale(im: np.ndarray) -> np.ndarray:
   """
   IntenScale as from Binghamton toolbox
+
   :param im: type np.uint8
   :return: intensity scaled version of input x
   """
@@ -362,6 +401,7 @@ def inten_scale(im: np.ndarray) -> np.ndarray:
 def saturation(im: np.ndarray) -> np.ndarray:
   """
   Saturation as from Binghamton toolbox
+
   :param im: type np.uint8
   :return: saturation map from input im
   """
@@ -404,7 +444,8 @@ def saturation(im: np.ndarray) -> np.ndarray:
 
 def inten_sat_compact(args):
   """
-  Memory saving version of inten_scale followed by saturation. Useful for multiprocessing
+  Memory saving version of inten_scale followed by saturation
+
   :param args:
   :return: intensity scale and saturation of input
   """
@@ -420,6 +461,7 @@ Cross-correlation functions
 def crosscorr_2d(k1: np.ndarray, k2: np.ndarray) -> np.ndarray:
   """
   PRNU 2D cross-correlation
+
   :param k1: 2D matrix of size (h1,w1)
   :param k2: 2D matrix of size (h2,w2)
   :return: 2D matrix of size (max(h1,h2),max(w1,w2))
@@ -445,9 +487,10 @@ def crosscorr_2d(k1: np.ndarray, k2: np.ndarray) -> np.ndarray:
 def aligned_cc(k1: np.ndarray, k2: np.ndarray) -> dict:
   """
   Aligned PRNU cross-correlation
+
   :param k1: (n1,nk) or (n1,nk1,nk2,...)
   :param k2: (n2,nk) or (n2,nk1,nk2,...)
-  :return: {'cc':(n1,n2) cross-correlation matrix,'ncc':(n1,n2) normalized cross-correlation matrix}
+  :return: {'cc':(n1,n2) cross-correlation matrix, 'ncc':(n1,n2) normalized cross-correlation matrix}
   """
 
   # Type cast
@@ -477,6 +520,7 @@ def aligned_cc(k1: np.ndarray, k2: np.ndarray) -> dict:
 def pce(cc: np.ndarray, neigh_radius: int = 2) -> dict:
   """
   PCE position and value
+
   :param cc: as from crosscorr2d
   :param neigh_radius: radius around the peak to be ignored while computing floor energy
   :return: {'peak':(y,x), 'pce': peak to floor ratio, 'cc': cross-correlation value at peak position
@@ -511,6 +555,7 @@ Statistical functions
 def stats(cc: np.ndarray, gt: np.ndarray, ) -> dict:
   """
   Compute statistics
+
   :param cc: cross-correlation or normalized cross-correlation matrix
   :param gt: boolean multidimensional array representing groundtruth
   :return: statistics dictionary
@@ -542,6 +587,7 @@ def stats(cc: np.ndarray, gt: np.ndarray, ) -> dict:
 def gt(l1: list or np.ndarray, l2: list or np.ndarray) -> np.ndarray:
   """
   Determine the Ground Truth matrix given the labels
+
   :param l1: fingerprints labels
   :param l2: residuals labels
   :return: groundtruth matrix
