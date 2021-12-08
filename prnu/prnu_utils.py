@@ -88,7 +88,7 @@ def prnu_extract(flat_image_dataset: str, model: nn.Module = None, device: str =
                                               tqdm_str='Calculating Noiseprints {}'.format(i), \
                                               sigma=sigma)
   # create a dictionary associating each fingerprint id with the corresponding estimated prnu
-  return Dict(zip(fingerprint_device, k))
+  return dict(zip(fingerprint_device, k))
 
 def prnu_test(nat_image_dataset: str, k: np.array, fingerprint_device: np.array, \
               model: nn.Module = None, device: str = 'cuda', gray: bool = False, \
@@ -167,5 +167,5 @@ def prnu_test(nat_image_dataset: str, k: np.array, fingerprint_device: np.array,
 
   print('AUC on CC {:.2f}'.format(stats_cc['auc']))
   print('AUC on PCE {:.2f}'.format(stats_pce['auc']))
-  
+
   return { 'cc': stats_cc, 'pce': stats_pce }
